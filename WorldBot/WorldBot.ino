@@ -40,6 +40,7 @@ void loop() {
     PestoLink.printBatteryVoltage(batteryVoltage);
   }
 
+  Serial.printf("%.3f, %.3f\r\n", uwb.getX(), uwb.getY());
 
   if (PestoLink.isConnected()) {
     if (PestoLink.buttonHeld(13)) {

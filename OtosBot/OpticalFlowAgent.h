@@ -18,10 +18,14 @@ inline void OpticalFlow_begin() {
     otosConnected = true;
 
     Serial.println("OTOS connected!");
-    myOtos.calibrateImu();
+    myOtos.calibrateImu(500);
     myOtos.setLinearUnit(kSfeOtosLinearUnitMeters);
     myOtos.setAngularUnit(kSfeOtosAngularUnitRadians);
     myOtos.resetTracking();
+
+    myOtos.setAngularScalar((10*2*PI)/(63.24));
+    myOtos.setLinearScalar(1.0/0.830);
+
 
     sfe_otos_pose2d_t offsetPose = {0, 0, 0};
     myOtos.setOffset(offsetPose);
