@@ -9,13 +9,12 @@
 void setup() {
   Serial.begin(115200);
   PestoLink.begin("OtosBot");
-
-  pinMode(0, INPUT_PULLUP);
+  NoU3.begin();
 
   beginDrivetrain();
+  pinMode(0, INPUT_PULLUP);
 
   NoU3.setServiceLight(LIGHT_CALIBRATING);
-  NoU3.begin();
   OpticalFlow_begin();
   NoU3.calibrateIMUs(); // takes 1000ms
 }
@@ -54,8 +53,7 @@ void loop() {
     
     NoU3.setServiceLight(LIGHT_ENABLED);
   } else {
-    directControlXY(0, 0);
-    directControlTheta(0);
+    NoU3.stopMotors();
     NoU3.setServiceLight(LIGHT_DISABLED);
   } 
   delay(1);
