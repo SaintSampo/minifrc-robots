@@ -69,7 +69,7 @@ void setup() {
   //launcherLeftMotor.setInverted(true);
   launcherRightMotor.setInverted(true);
   //intakeMotor.setInverted(true);
-  drivetrain.setMotorCurves(0.3, 1, 0.1, 1.5);
+  drivetrain.setMotorCurves(0.25, 1, 0.05, 1.5);
 }
 
 void loop() {
@@ -148,8 +148,8 @@ bool scanAndFire() {
         bool scanningLeft = PestoLink.buttonHeld(SCAN_LEFT);
         buttonScan = scanningLeft ? SCAN_LEFT : SCAN_RIGHT;
         buttonFire = scanningLeft ? SCAN_RIGHT : SCAN_LEFT;
-        scanEffort = scanningLeft ? -0.5 : 0.5;
-        smallestReading = 400.0;
+        scanEffort = scanningLeft ? -0.47 : 0.47;
+        smallestReading = 1000000000.0;
         targetAngle = NoU3.yaw * angular_scale;
         scanState = SCAN_SCANNING;
       }
@@ -179,8 +179,8 @@ bool scanAndFire() {
         launcherLeftMotor.set(1);
         launcherRightMotor.set(1);
 
-        float angleThreshold = 4.0 * (PI / 180.0);  // 4 degrees
-        if (errorAngle < angleThreshold) {
+        float angleThreshold = 2.0 * (PI / 180.0);  // 4 degrees
+        if (abs(errorAngle) < angleThreshold) {
           spindexerMotors.set(1);
         } else {
           spindexerMotors.set(0);
