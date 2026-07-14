@@ -11,7 +11,8 @@ NoU_Drivetrain drivetrain(&frontLeftMotor, &frontRightMotor, &rearLeftMotor, &re
 
 NoU_Motor intakeMotor(1);
 NoU_Motor spindexerMotors(5);
-NoU_Motor launcherMotors(8);
+NoU_Motor launcherLeftMotor(2);
+NoU_Motor launcherRightMotor(8);
 
 float Ku = 8.28;
 float Tu = 1.0 / (195.0 / 60.0);  //Period = 1/(BPM/60), BPM is measuring full cycles per minute
@@ -36,7 +37,7 @@ float measured_angle = 28.38 * -1.0;  //have to multiply by -1 because the Potho
 float angular_scale = (5.0 * 2.0 * PI) / measured_angle;
 
 typedef enum {
-  INTAKE = 0,
+  INTAKE = 4,
   LAUNCHERS = 1,
   SPINDEXERS = 3,
   SCAN_LEFT = 6,
@@ -65,7 +66,8 @@ void setup() {
   rearLeftMotor.setInverted(true);
   //rearRightMotor.setInverted(true);
   //intakeMotors.setInverted(true);
-  //launcherMotors.setInverted(true);
+  //launcherLeftMotor.setInverted(true);
+  launcherRightMotor.setInverted(true);
   //intakeMotor.setInverted(true);
   drivetrain.setMotorCurves(0.3, 1, 0.1, 1.5);
 }
@@ -89,7 +91,8 @@ void loop() {
     // While the scan-and-fire routine is active it owns the drivetrain,
     // launcher, and spindexer, so teleop only commands them when it is idle
     if (!scanAndFire()) {
-      launcherMotors.set(PestoLink.buttonHeld(LAUNCHERS) ? 1 : 0);
+      launcherLeftMotor.set(PestoLink.buttonHeld(LAUNCHERS) ? 1 : 0);
+      launcherRightMotor.set(PestoLink.buttonHeld(LAUNCHERS) ? 1 : 0);
       spindexerMotors.set(PestoLink.buttonHeld(SPINDEXERS) ? 1 : 0);
 
       float throttle = -PestoLink.getAxis(1);
@@ -145,7 +148,7 @@ bool scanAndFire() {
         bool scanningLeft = PestoLink.buttonHeld(SCAN_LEFT);
         buttonScan = scanningLeft ? SCAN_LEFT : SCAN_RIGHT;
         buttonFire = scanningLeft ? SCAN_RIGHT : SCAN_LEFT;
-        scanEffort = scanningLeft ? -0.55 : 0.55;
+        scanEffort = scanningLeft ? -0.5 : 0.5;
         smallestReading = 400.0;
         targetAngle = NoU3.yaw * angular_scale;
         scanState = SCAN_SCANNING;
@@ -155,7 +158,6 @@ bool scanAndFire() {
     case SCAN_SCANNING:
       if (PestoLink.buttonHeld(buttonScan)) {
         drivetrain.arcadeDrive(0, scanEffort);
-        launcherMotors.set(1);
 
         float reading = readDistanceCm();
         if (reading < smallestReading) {
@@ -174,7 +176,8 @@ bool scanAndFire() {
     case SCAN_AIMING:
       if (PestoLink.buttonHeld(buttonFire)) {
         float errorAngle = aimAtTarget();
-        launcherMotors.set(1);
+        launcherLeftMotor.set(1);
+        launcherRightMotor.set(1);
 
         float angleThreshold = 4.0 * (PI / 180.0);  // 4 degrees
         if (errorAngle < angleThreshold) {
@@ -190,7 +193,8 @@ bool scanAndFire() {
     case SCAN_TESTING:
       if (PestoLink.buttonHeld(TEST_PIDF)) {
         aimAtTarget();
-        launcherMotors.set(0);
+        launcherLeftMotor.set(0);
+        launcherRightMotor.set(0);
         spindexerMotors.set(0);
       } else {
         scanState = SCAN_IDLE;
