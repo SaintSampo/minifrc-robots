@@ -1,6 +1,6 @@
 #include <PestoLink-Receive.h>
 #include <Alfredo_NoU3.h>
-#include <VL53L0X.h>
+#include "DistanceSensor.h"
 #include "PIDF.h"
 
 NoU_Motor frontLeftMotor(4);
@@ -19,12 +19,6 @@ float Tu = 1.0 / (195.0 / 60.0);  //Period = 1/(BPM/60), BPM is measuring full c
 float Kp = 0.8 * Ku;            //0.8 * X_Ku;
 float Kd = 0.125 * Ku * Tu;     //0.125 * X_Tu;
 PIDF scanPID(Kp, 0.0, Kd);
-
-// VL53L0X time-of-flight sensor on the qwiic port (NoU3.begin() sets up Wire on those pins)
-VL53L0X distanceSensor;
-float readDistanceCm() {
-  return distanceSensor.readRangeContinuousMillimeters() / 10.0;
-}
 
 // Like Arduino's map(), but for floats
 float mapFloat(float x, float in_min, float in_max, float out_min, float out_max) {
@@ -57,9 +51,7 @@ void setup() {
   NoU3.setServiceLight(LIGHT_CALIBRATING);
   NoU3.calibrateIMUs();
 
-  distanceSensor.setTimeout(500);
-  distanceSensor.init();
-  distanceSensor.startContinuous();
+  beginDistanceSensor();
 
   frontLeftMotor.setInverted(true);
   //frontRightMotor.setInverted(true);
@@ -91,8 +83,8 @@ void loop() {
     // While the scan-and-fire routine is active it owns the drivetrain,
     // launcher, and spindexer, so teleop only commands them when it is idle
     if (!scanAndFire()) {
-      launcherLeftMotor.set(PestoLink.buttonHeld(LAUNCHERS) ? 1 : 0);
-      launcherRightMotor.set(PestoLink.buttonHeld(LAUNCHERS) ? 1 : 0);
+      launcherLeftMotor.set(PestoLink.buttonHeld(LAUNCHERS) ? 0.6 : 0);
+      launcherRightMotor.set(PestoLink.buttonHeld(LAUNCHERS) ? 0.6 : 0);
       spindexerMotors.set(PestoLink.buttonHeld(SPINDEXERS) ? 1 : 0);
 
       float throttle = -PestoLink.getAxis(1);
@@ -115,8 +107,40 @@ ScanState scanState = SCAN_IDLE;
 int buttonScan;
 int buttonFire;
 float scanEffort;
-float smallestReading;
 float targetAngle;
+
+// Readings closer than this count as the target; farther ones are ignored
+const float TARGET_DISTANCE_CM = 200.0;
+// Ignore the shot unless at least this many on-target readings were collected
+const int MIN_TARGET_COUNT = 3;
+float angleSum;
+float distanceSum;
+int targetCount;
+float launcherPower;
+
+// Measured (distance cm, launcher power) pairs, sorted by distance.
+// PLACEHOLDER VALUES - replace with your collected data.
+struct LaunchPoint { float distanceCm; float power; };
+LaunchPoint launchTable[] = {
+  { 27.0, 0.6 },
+  { 58.0, 1.0 },
+};
+const int launchTableSize = sizeof(launchTable) / sizeof(launchTable[0]);
+
+// Linearly interpolates launcher power for a distance, clamped past the ends.
+float launcherPowerForDistance(float distanceCm) {
+  if (distanceCm <= launchTable[0].distanceCm) return launchTable[0].power;
+  if (distanceCm >= launchTable[launchTableSize - 1].distanceCm) return launchTable[launchTableSize - 1].power;
+
+  for (int i = 1; i < launchTableSize; i++) {
+    if (distanceCm < launchTable[i].distanceCm) {
+      return mapFloat(distanceCm,
+                      launchTable[i - 1].distanceCm, launchTable[i].distanceCm,
+                      launchTable[i - 1].power, launchTable[i].power);
+    }
+  }
+  return launchTable[launchTableSize - 1].power;  // unreachable
+}
 
 // Turns the robot toward targetAngle with the scan PID.
 // Returns the current error in radians.
@@ -148,9 +172,11 @@ bool scanAndFire() {
         bool scanningLeft = PestoLink.buttonHeld(SCAN_LEFT);
         buttonScan = scanningLeft ? SCAN_LEFT : SCAN_RIGHT;
         buttonFire = scanningLeft ? SCAN_RIGHT : SCAN_LEFT;
-        scanEffort = scanningLeft ? -0.47 : 0.47;
-        smallestReading = 1000000000.0;
-        targetAngle = NoU3.yaw * angular_scale;
+        scanEffort = scanningLeft ? -0.5 : 0.5;
+        angleSum = 0;
+        distanceSum = 0;
+        targetCount = 0;
+        targetAngle = NoU3.yaw * angular_scale;  // fallback if the target is never seen
         scanState = SCAN_SCANNING;
       }
       break;
@@ -160,13 +186,24 @@ bool scanAndFire() {
         drivetrain.arcadeDrive(0, scanEffort);
 
         float reading = readDistanceCm();
-        if (reading < smallestReading) {
-          smallestReading = reading;
-          targetAngle = NoU3.yaw * angular_scale;
+        Serial.printf("reading: %.2f, angle: %.3f \n", reading, NoU3.yaw * angular_scale);
+        if (reading < TARGET_DISTANCE_CM) {
+          angleSum += NoU3.yaw * angular_scale;
+          distanceSum += reading;
+          targetCount++;
         }
       } else if (PestoLink.buttonHeld(buttonFire)) {
-        scanPID.clear_history();
-        scanState = SCAN_AIMING;
+        if (targetCount >= MIN_TARGET_COUNT) {
+          // Aim at the average angle of all the on-target readings (the center)
+          targetAngle = angleSum / targetCount;
+          // Set launcher power from the average distance to the target
+          launcherPower = launcherPowerForDistance(distanceSum / targetCount);
+          scanPID.clear_history();
+          scanState = SCAN_AIMING;
+        } else {
+          // not enough of the target was seen, back to teleop
+          scanState = SCAN_IDLE;
+        }
       } else {
         // scan button released without the fire button held, cancel
         scanState = SCAN_IDLE;
@@ -176,10 +213,10 @@ bool scanAndFire() {
     case SCAN_AIMING:
       if (PestoLink.buttonHeld(buttonFire)) {
         float errorAngle = aimAtTarget();
-        launcherLeftMotor.set(1);
-        launcherRightMotor.set(1);
+        launcherLeftMotor.set(launcherPower);
+        launcherRightMotor.set(launcherPower);
 
-        float angleThreshold = 2.0 * (PI / 180.0);  // 4 degrees
+        float angleThreshold = 2.0 * (PI / 180.0);
         if (abs(errorAngle) < angleThreshold) {
           spindexerMotors.set(1);
         } else {
