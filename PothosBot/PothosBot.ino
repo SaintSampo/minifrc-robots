@@ -3,16 +3,16 @@
 #include "DistanceSensor.h"
 #include "PIDF.h"
 
-NoU_Motor frontLeftMotor(4);
-NoU_Motor frontRightMotor(6);
-NoU_Motor rearLeftMotor(3);
-NoU_Motor rearRightMotor(7);
+NoU_Motor frontLeftMotor(6);
+NoU_Motor frontRightMotor(3);
+NoU_Motor rearLeftMotor(4);
+NoU_Motor rearRightMotor(5);
 NoU_Drivetrain drivetrain(&frontLeftMotor, &frontRightMotor, &rearLeftMotor, &rearRightMotor);
 
-NoU_Motor intakeMotor(1);
-NoU_Motor spindexerMotors(5);
-NoU_Motor launcherLeftMotor(2);
-NoU_Motor launcherRightMotor(8);
+NoU_Motor intakeMotorLeft(2);
+NoU_Motor intakeMotorRight(8);
+NoU_Motor spindexerMotors(7);
+NoU_Motor launcherMotors(1);
 
 float Ku = 8.28;
 float Tu = 1.0 / (195.0 / 60.0);  //Period = 1/(BPM/60), BPM is measuring full cycles per minute
@@ -31,9 +31,12 @@ float measured_angle = 28.38 * -1.0;  //have to multiply by -1 because the Potho
 float angular_scale = (5.0 * 2.0 * PI) / measured_angle;
 
 typedef enum {
-  INTAKE = 4,
+  LAUNCHERS_REVERSE = 0,
   LAUNCHERS = 1,
+  SPINDEXERS_REVERSE = 2,
   SPINDEXERS = 3,
+  INTAKE = 4,
+  INTAKE_REVERSE = 5,
   SCAN_LEFT = 6,
   SCAN_RIGHT = 7,
   TEST_PIDF = 12,
@@ -53,15 +56,15 @@ void setup() {
 
   beginDistanceSensor();
 
-  frontLeftMotor.setInverted(true);
+  //frontLeftMotor.setInverted(true);
   //frontRightMotor.setInverted(true);
-  rearLeftMotor.setInverted(true);
-  //rearRightMotor.setInverted(true);
-  //intakeMotors.setInverted(true);
-  //launcherLeftMotor.setInverted(true);
-  launcherRightMotor.setInverted(true);
-  //intakeMotor.setInverted(true);
-  drivetrain.setMotorCurves(0.25, 1, 0.05, 1.5);
+  //rearLeftMotor.setInverted(true);
+  rearRightMotor.setInverted(true);
+  intakeMotorLeft.setInverted(true);
+  intakeMotorRight.setInverted(true);
+  spindexerMotors.setInverted(true);
+  //launcherMotors.setInverted(true);
+  drivetrain.setMotorCurves(0.2, 1, 0.05, 1.2);
 }
 
 void loop() {
@@ -78,19 +81,27 @@ void loop() {
   }
 
   if (PestoLink.isConnected()) {
-    intakeMotor.set(PestoLink.buttonHeld(INTAKE) ? 1 : 0);
+    // Press START_AUTO to run the autonomous routine; it blocks until done
+    if (PestoLink.buttonHeld(START_AUTO)) {
+      runAuto();
+    } else {
+      float intake_power = PestoLink.buttonHeld(INTAKE) - PestoLink.buttonHeld(INTAKE_REVERSE);
+      intakeMotorLeft.set(intake_power);
+      intakeMotorRight.set(intake_power);
 
-    // While the scan-and-fire routine is active it owns the drivetrain,
-    // launcher, and spindexer, so teleop only commands them when it is idle
-    if (!scanAndFire()) {
-      launcherLeftMotor.set(PestoLink.buttonHeld(LAUNCHERS) ? 0.6 : 0);
-      launcherRightMotor.set(PestoLink.buttonHeld(LAUNCHERS) ? 0.6 : 0);
-      spindexerMotors.set(PestoLink.buttonHeld(SPINDEXERS) ? 1 : 0);
+      // While the scan-and-fire routine is active it owns the drivetrain,
+      // launcher, and spindexer, so teleop only commands them when it is idle
+      if (!scanAndFire()) {
+        float launcher_power = (0.65 * PestoLink.buttonHeld(LAUNCHERS)) - PestoLink.buttonHeld(LAUNCHERS_REVERSE);
+        float spindexer_power = (0.9 * PestoLink.buttonHeld(SPINDEXERS)) - PestoLink.buttonHeld(SPINDEXERS_REVERSE);
+        launcherMotors.set(launcher_power);
+        spindexerMotors.set(spindexer_power);
 
-      float throttle = -PestoLink.getAxis(1);
-      float rotation = PestoLink.getAxis(2);
+        float throttle = -PestoLink.getAxis(1);
+        float rotation = PestoLink.getAxis(2);
 
-      drivetrain.arcadeDrive(throttle, rotation);
+        drivetrain.arcadeDrive(throttle, rotation);
+      }
     }
 
     NoU3.setServiceLight(LIGHT_ENABLED);
@@ -122,8 +133,8 @@ float launcherPower;
 // PLACEHOLDER VALUES - replace with your collected data.
 struct LaunchPoint { float distanceCm; float power; };
 LaunchPoint launchTable[] = {
-  { 27.0, 0.6 },
-  { 58.0, 1.0 },
+  { 10.0, 0.6 },
+  { 40.0, 1.0 },
 };
 const int launchTableSize = sizeof(launchTable) / sizeof(launchTable[0]);
 
@@ -154,6 +165,50 @@ float aimAtTarget() {
   return errorAngle;
 }
 
+// Begins a sweep: clears the collected readings and sets the sweep rotation.
+void startScan(float effort) {
+  scanEffort = effort;
+  angleSum = 0;
+  distanceSum = 0;
+  targetCount = 0;
+  targetAngle = NoU3.yaw * angular_scale;  // fallback if the target is never seen
+}
+
+// One sweep iteration: rotate and collect any on-target reading.
+void scanStep() {
+  drivetrain.arcadeDrive(0, scanEffort);
+
+  float reading = readDistanceCm();
+  Serial.printf("reading: %.2f, angle: %.3f \n", reading, NoU3.yaw * angular_scale);
+  if (reading < TARGET_DISTANCE_CM) {
+    angleSum += NoU3.yaw * angular_scale;
+    distanceSum += reading;
+    targetCount++;
+  }
+}
+
+// Ends a sweep: aims at the average angle of the on-target readings (the
+// center) and picks the launcher power for their average distance.
+// Returns false if not enough of the target was seen.
+bool lockTarget() {
+  if (targetCount < MIN_TARGET_COUNT) return false;
+
+  targetAngle = angleSum / targetCount;
+  launcherPower = launcherPowerForDistance(distanceSum / targetCount);
+  scanPID.clear_history();
+  return true;
+}
+
+// One aiming iteration: turn toward the target, spin the launcher, and run
+// the spindexer while lined up.
+void aimAndFireStep() {
+  float errorAngle = aimAtTarget();
+  launcherMotors.set(launcherPower);
+
+  float angleThreshold = 2.0 * (PI / 180.0);
+  spindexerMotors.set(fabs(errorAngle) < angleThreshold ? 1 : 0);
+}
+
 // Runs one step of the scan-and-fire routine, call it once per loop.
 // Hold a scan button to sweep, then hold the opposite button to aim and fire.
 // Returns true while the routine is controlling the robot.
@@ -172,56 +227,25 @@ bool scanAndFire() {
         bool scanningLeft = PestoLink.buttonHeld(SCAN_LEFT);
         buttonScan = scanningLeft ? SCAN_LEFT : SCAN_RIGHT;
         buttonFire = scanningLeft ? SCAN_RIGHT : SCAN_LEFT;
-        scanEffort = scanningLeft ? -0.5 : 0.5;
-        angleSum = 0;
-        distanceSum = 0;
-        targetCount = 0;
-        targetAngle = NoU3.yaw * angular_scale;  // fallback if the target is never seen
+        startScan(scanningLeft ? -0.5 : 0.5);
         scanState = SCAN_SCANNING;
       }
       break;
 
     case SCAN_SCANNING:
       if (PestoLink.buttonHeld(buttonScan)) {
-        drivetrain.arcadeDrive(0, scanEffort);
-
-        float reading = readDistanceCm();
-        Serial.printf("reading: %.2f, angle: %.3f \n", reading, NoU3.yaw * angular_scale);
-        if (reading < TARGET_DISTANCE_CM) {
-          angleSum += NoU3.yaw * angular_scale;
-          distanceSum += reading;
-          targetCount++;
-        }
-      } else if (PestoLink.buttonHeld(buttonFire)) {
-        if (targetCount >= MIN_TARGET_COUNT) {
-          // Aim at the average angle of all the on-target readings (the center)
-          targetAngle = angleSum / targetCount;
-          // Set launcher power from the average distance to the target
-          launcherPower = launcherPowerForDistance(distanceSum / targetCount);
-          scanPID.clear_history();
-          scanState = SCAN_AIMING;
-        } else {
-          // not enough of the target was seen, back to teleop
-          scanState = SCAN_IDLE;
-        }
+        scanStep();
+      } else if (PestoLink.buttonHeld(buttonFire) && lockTarget()) {
+        scanState = SCAN_AIMING;
       } else {
-        // scan button released without the fire button held, cancel
+        // scan cancelled, or not enough of the target was seen
         scanState = SCAN_IDLE;
       }
       break;
 
     case SCAN_AIMING:
       if (PestoLink.buttonHeld(buttonFire)) {
-        float errorAngle = aimAtTarget();
-        launcherLeftMotor.set(launcherPower);
-        launcherRightMotor.set(launcherPower);
-
-        float angleThreshold = 2.0 * (PI / 180.0);
-        if (abs(errorAngle) < angleThreshold) {
-          spindexerMotors.set(1);
-        } else {
-          spindexerMotors.set(0);
-        }
+        aimAndFireStep();
       } else {
         scanState = SCAN_IDLE;
       }
@@ -230,8 +254,7 @@ bool scanAndFire() {
     case SCAN_TESTING:
       if (PestoLink.buttonHeld(TEST_PIDF)) {
         aimAtTarget();
-        launcherLeftMotor.set(0);
-        launcherRightMotor.set(0);
+        launcherMotors.set(0);
         spindexerMotors.set(0);
       } else {
         scanState = SCAN_IDLE;
@@ -240,4 +263,73 @@ bool scanAndFire() {
   }
 
   return scanState != SCAN_IDLE;
+}
+
+//---------------------------------------- Auto Mode ----------------------------------//
+
+// arcadeDrive rotation that turns the robot LEFT, and the sign of a left turn in
+// gyro heading units. If auto turns the wrong way, negate BOTH of these.
+const float AUTO_LEFT_ROTATION = -0.5;
+const float AUTO_LEFT_SIGN = 1.0;
+const float AUTO_LAUNCH_POWER = 1.0;
+const float AUTO_TURN_TOLERANCE = 3.0 * (PI / 180.0);
+
+// Blocks until the robot has turned to target (or 3 s passes), using the scan PID.
+void turnToAngle(float target) {
+  targetAngle = target;
+  scanPID.clear_history();
+  unsigned long start = millis();
+  while (millis() - start < 3000) {
+    if (fabs(aimAtTarget()) < AUTO_TURN_TOLERANCE) break;
+    delay(5);
+  }
+  drivetrain.arcadeDrive(0, 0);
+}
+
+// The full autonomous routine. Blocks from START_AUTO until it finishes.
+void runAuto() {
+  float startHeading = NoU3.yaw * angular_scale;
+  intakeMotorLeft.set(1);
+  intakeMotorRight.set(1);
+  drivetrain.arcadeDrive(0.5, 0);
+  delay(900);
+  drivetrain.arcadeDrive(0.375, 0);
+  delay(1500);
+  drivetrain.arcadeDrive(-0.5, 0);
+  delay(750);
+  drivetrain.arcadeDrive(0, 0);
+  delay(1100);
+
+  turnToAngle(startHeading + AUTO_LEFT_SIGN * (PI / 2.0));  // turn left 90 degrees
+  delay(1000);
+
+  // Sweep left 135 degrees collecting readings, same as a teleop scan
+  launcherMotors.set(AUTO_LAUNCH_POWER);  // spin up while sweeping
+  float scanStart = NoU3.yaw * angular_scale;
+  startScan(AUTO_LEFT_ROTATION);
+  while (AUTO_LEFT_SIGN * ((NoU3.yaw * angular_scale) - scanStart) < 135.0 * (PI / 180.0)) {
+    scanStep();
+    delay(5);
+  }
+
+  // Aim at the target the sweep found and fire
+  if (lockTarget()) {
+    unsigned long fireStart = millis();
+    while (millis() - fireStart < 6000) {
+      aimAndFireStep();
+      delay(5);
+    }
+  }
+  launcherMotors.set(0);
+  spindexerMotors.set(0);
+  drivetrain.arcadeDrive(0, 0);
+
+  drivetrain.arcadeDrive(0.8, 0);   // forward 0.3 s
+  delay(300);
+
+  turnToAngle(startHeading + AUTO_LEFT_SIGN * PI);  // rotate to 180 degrees (absolute)
+
+  drivetrain.arcadeDrive(0.8, 0);   // forward 2 s
+  delay(2000);
+  drivetrain.arcadeDrive(0, 0);
 }
